@@ -128,10 +128,20 @@ def format_sheet(ws):
 
 def add_summary_sheet(wb, extract_df: pd.DataFrame):
     df = extract_df.copy()
-    df['DateFmt'] = pd.to_datetime(
-        df['Ordered Date (AS)'], format='%d/%m/%Y', errors='coerce'
-    ).dt.strftime('%d-%b')
+    # Strip any lingering time component (e.g. "07/07/2026 14:43:14" -> "07/07/2026")
+    # before parsing, and parse with dayfirst instead of a rigid format so this
+    # doesn't silently drop every row if the raw string still has a timestamp.
+    date_only = df['Ordered Date (AS)'].astype(str).str.strip().str.split(' ').str[0]
+    parsed = pd.to_datetime(date_only, dayfirst=True, errors='coerce')
+    df['DateFmt'] = parsed.dt.strftime('%d-%b')
+
     df = df.dropna(subset=['DateFmt'])
+
+    if df.empty:
+        raise ValueError(
+            "No rows had a parseable Ordered Date, so the Summary pivot "
+            "would be empty. Check the 'Ordered Date (AS)' column values."
+        )
 
     group_cols = ['Nickname (BD)', 'Order Item Status (J)', 'WMS Status']
     pt = df.groupby(group_cols + ['DateFmt']).size().unstack('DateFmt', fill_value=0)
@@ -212,7 +222,15 @@ def build_report(csv_file, sale_order_file) -> bytes:
     matched = apply_wms_lookup(ws, sale_order_file)
     strip_time_from_dates(ws)
     format_sheet(ws)
-    add_summary_sheet(wb, extract)
+
+    # Re-read the data back from the worksheet now that WMS Status/Payment
+    # have been filled in and Ordered Date has had its time stripped, so the
+    # Summary pivot reflects the final values instead of the pre-lookup ones.
+    final_rows = [[c.value for c in row] for row in ws.iter_rows(min_row=2)]
+    final_headers = [c.value for c in ws[1]]
+    final_df = pd.DataFrame(final_rows, columns=final_headers)
+
+    add_summary_sheet(wb, final_df)
 
     out = io.BytesIO()
     wb.save(out)
