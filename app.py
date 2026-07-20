@@ -133,6 +133,7 @@ def add_summary_sheet(wb, extract_df: pd.DataFrame):
     # doesn't silently drop every row if the raw string still has a timestamp.
     date_only = df['Ordered Date (AS)'].astype(str).str.strip().str.split(' ').str[0]
     parsed = pd.to_datetime(date_only, dayfirst=True, errors='coerce')
+    df['DateFull'] = parsed.dt.date
     df['DateFmt'] = parsed.dt.strftime('%d-%b')
 
     df = df.dropna(subset=['DateFmt'])
@@ -147,6 +148,11 @@ def add_summary_sheet(wb, extract_df: pd.DataFrame):
     pt = df.groupby(group_cols + ['DateFmt']).size().unstack('DateFmt', fill_value=0)
     date_cols = sorted(pt.columns, key=lambda d: datetime.strptime(d, '%d-%b'))
     pt = pt[date_cols].reset_index().sort_values(group_cols).reset_index(drop=True)
+
+    # Map each formatted column label (e.g. "07-Jul") back to its real date
+    # (with year) so we can compare against today's date.
+    label_to_date = df.drop_duplicates('DateFmt').set_index('DateFmt')['DateFull'].to_dict()
+    today = datetime.now().date()
 
     if 'Summary' in wb.sheetnames:
         del wb['Summary']
@@ -164,7 +170,15 @@ def add_summary_sheet(wb, extract_df: pd.DataFrame):
         c = ws.cell(row=1, column=j, value=h)
         c.font, c.fill, c.border, c.alignment = header_font, header_fill, border, center
 
-    date_col_fills = {d: PALETTE[i % len(PALETTE)] for i, d in enumerate(date_cols)}
+    date_col_fills = {}
+    for d in date_cols:
+        real_date = label_to_date.get(d)
+        if real_date == today:
+            date_col_fills[d] = '92D050'  # green — today
+        elif real_date is not None and real_date < today:
+            date_col_fills[d] = 'FF0000'  # red — older/pending
+        else:
+            date_col_fills[d] = 'BFBFBF'  # gray — future date (unexpected)
     n = len(pt)
 
     for i, row in pt.iterrows():
@@ -214,11 +228,12 @@ def build_report(csv_file, sale_order_file) -> bytes:
     extract = filter_and_extract(df)
 
     buf = io.BytesIO()
-    extract.to_excel(buf, index=False)
+    extract.to_excel(buf, index=False, sheet_name='Data')
     buf.seek(0)
 
     wb = load_workbook(buf)
     ws = wb.active
+    ws.title = 'Data'
     matched = apply_wms_lookup(ws, sale_order_file)
     strip_time_from_dates(ws)
     format_sheet(ws)
@@ -250,7 +265,8 @@ st.write(
 
 csv_file = st.file_uploader("Orders CSV (e.g. ALL-08-Jul-2026.csv)", type=["csv"])
 sale_order_file = st.file_uploader("Sale order Excel export", type=["xlsx"])
-output_name = st.text_input("Output file name", value="AACMH Kose Pending Order Report.xlsx")
+default_name = f"AACMH Kose Pending Order Report {datetime.now().strftime('%d-%b-%Y')}.xlsx"
+output_name = st.text_input("Output file name", value=default_name)
 
 if st.button("Build report", type="primary", disabled=not (csv_file and sale_order_file)):
     try:
